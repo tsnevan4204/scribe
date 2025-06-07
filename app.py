@@ -1,5 +1,6 @@
 # === Updated Flask App with Better Audio Handling ===
-
+import litellm
+from litellm import completion
 from flask import Flask, request, send_from_directory, jsonify
 from google.cloud import storage, speech_v1p1beta1 as speech
 from dotenv import load_dotenv
@@ -9,6 +10,10 @@ import pytz
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
+
+litellm.api_key = os.getenv("GROQ_API_KEY")
+litellm.provider = "groq"
+MODEL_NAME="groq/deepseek-r1-distill-llama-70b"
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
@@ -92,9 +97,15 @@ def start_session():
     if SESSION_ACTIVE:
         return {"error": "Session already active"}, 400
 
+    data = request.get_json()
+    raw_name = data.get("session_name", "").strip()
+
+    if not raw_name or "/" in raw_name or "\\" in raw_name:
+        return {"error": "Invalid session name"}, 400
+
     SESSION_ACTIVE = True
-    session_name = f"session_{est_now()}"
-    SESSION_FOLDER = os.path.join(UPLOAD_FOLDER, session_name)  # Keep uploads folder
+    session_name = f"session_{raw_name}"
+    SESSION_FOLDER = os.path.join(UPLOAD_FOLDER, session_name)
     os.makedirs(SESSION_FOLDER, exist_ok=True)
     TRANSCRIPT_PATH = os.path.join(SESSION_FOLDER, f"transcript_{session_name}.txt")
     logging.info(f"🟢 Session started in {SESSION_FOLDER}")
@@ -107,25 +118,42 @@ def end_session():
         return {"error": "No session active"}, 400
 
     try:
-        # Final upload of transcript to GCS (redundant but ensures it's there)
+        session_name = SESSION_FOLDER.split('/')[-1]
+
+        # Upload transcript to GCS if exists
         if os.path.exists(TRANSCRIPT_PATH):
-            session_name = SESSION_FOLDER.split('/')[-1]  # Extract session name from path
             transcript_blob = bucket.blob(f"{session_name}/transcript_{session_name}.txt")
             transcript_blob.upload_from_filename(TRANSCRIPT_PATH, content_type="text/plain")
             logging.info(f"☁️ Final transcript upload to GCS: {session_name}/transcript_{session_name}.txt")
-        
-        # Clean up local session folder
+
+            # === Run LLM on transcript ===
+            with open(TRANSCRIPT_PATH, "r", encoding='utf-8') as f:
+                transcript_text = f.read()
+
+            medical_record = generate_medical_record_from_transcript(transcript_text)
+
+            # Save locally
+            structured_path = os.path.join(SESSION_FOLDER, f"structured_{session_name}.txt")
+            with open(structured_path, "w", encoding='utf-8') as f:
+                f.write(medical_record)
+            logging.info(f"📝 Structured medical record saved: {structured_path}")
+
+            # Upload to GCS
+            blob_structured = bucket.blob(f"{session_name}/structured_{session_name}.txt")
+            blob_structured.upload_from_filename(structured_path, content_type="text/plain")
+            logging.info(f"☁️ Uploaded structured note to GCS: {session_name}/structured_{session_name}.txt")
+
+        # Clean up local folder
         if os.path.exists(SESSION_FOLDER):
             shutil.rmtree(SESSION_FOLDER)
             logging.info(f"🧹 Cleaned up local session folder: {SESSION_FOLDER}")
-        
-        # Clean up any residual folders from old naming patterns
+
         cleanup_residual_folders()
         cleanup_gcs_residual_folders()
-        
+
     except Exception as cleanup_error:
         logging.warning(f"⚠️ Session cleanup warning: {cleanup_error}")
-    
+
     SESSION_ACTIVE = False
     logging.info(f"🔴 Session ended")
     return {"message": "Session ended"}, 200
@@ -147,6 +175,32 @@ def cleanup_residual_folders():
                     logging.info(f"🧹 Cleaned up residual folder: {folder}")
             except Exception as e:
                 logging.warning(f"⚠️ Could not clean up residual folder {folder}: {e}")
+
+import re
+
+def clean_llm_output(text: str) -> str:
+    """Removes DeepSeek-style <think>...</think> blocks."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+def generate_medical_record_from_transcript(transcript_text: str) -> str:
+    prompt = (
+        "You are a clinical documentation assistant. Format the following unstructured "
+        "medical transcript into a structured SOAP medical record.\n\nTranscript:\n"
+        f"{transcript_text.strip()}"
+    )
+
+    try:
+        result = completion(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": "You are a medical record assistant."},
+                {"role": "user", "content": prompt},
+            ]
+        )
+        raw_output = result["choices"][0]["message"]["content"]
+        return clean_llm_output(raw_output)
+    except Exception as e:
+        return f"[Error generating medical record: {str(e)}]"
 
 def cleanup_gcs_residual_folders():
     """Clean up empty folders in GCS bucket"""

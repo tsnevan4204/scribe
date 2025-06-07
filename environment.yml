@@ -18,3 +18,4 @@ dependencies:
       - python-dotenv
       - google-cloud-storage>=2.0.0
       - google-cloud-speech>=2.24.0
+      - litellm

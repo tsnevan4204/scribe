@@ -5,6 +5,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Scribe Voice Recorder</title>
+    <audio id="recordStartSound" src="start-sound.mp3" preload="auto"></audio>
+    <audio id="uploadCompleteSound" src="upload-success.mp3" preload="auto"></audio>
     <style>
         body {
             font-family: sans-serif;
@@ -41,6 +43,8 @@
 
 <body>
     <h1>Scribe Voice Recorder</h1>
+    <input id="sessionNameInput" type="text" placeholder="Enter session name"
+        style="padding: 8px; font-size: 16px; width: 60%;" />
     <button id="startSessionBtn">Start Session</button>
     <button id="startBtn" disabled>Start Recording</button>
     <button id="endSessionBtn" disabled>End Session</button>
@@ -59,21 +63,28 @@
         const threshold = 0.01;
 
         document.getElementById("startSessionBtn").onclick = async function () {
-            const res = await fetch("/start_session", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({})
-            });
+                const sessionName = document.getElementById("sessionNameInput").value.trim();
+                if (!sessionName) {
+                    document.getElementById("status").textContent = "❌ Please enter a session name";
+                    return;
+                }
 
-            if (res.ok) {
-                document.getElementById("status").textContent = "🟢 Session started";
-                document.getElementById("startBtn").disabled = false;
-                document.getElementById("endSessionBtn").disabled = false;
-                document.getElementById("startSessionBtn").disabled = true;
-            } else {
-                document.getElementById("status").textContent = "❌ Failed to start session";
-            }
-        };
+                const res = await fetch("/start_session", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ session_name: sessionName })
+                });
+
+                if (res.ok) {
+                    document.getElementById("status").textContent = "🟢 Session started";
+                    document.getElementById("startBtn").disabled = false;
+                    document.getElementById("endSessionBtn").disabled = false;
+                    document.getElementById("startSessionBtn").disabled = true;
+                } else {
+                    document.getElementById("status").textContent = "❌ Failed to start session";
+                }
+            };
+
 
         document.getElementById("endSessionBtn").onclick = async function () {
             // Clean up any active recording
@@ -152,6 +163,7 @@
 
                 const startRecording = () => {
                     document.getElementById("status").textContent = "🎙️ Listening... (speak now)";
+                    document.getElementById("recordStartSound").play();
 
                     // Configure MediaRecorder with fallback options
                     let options = { mimeType: 'audio/webm;codecs=opus' };
@@ -218,6 +230,7 @@
                             if (res.ok) {
                                 const data = await res.json();
                                 document.getElementById("status").textContent = "✅ Transcription complete";
+                                document.getElementById("uploadCompleteSound").play();
                                 document.getElementById("transcriptText").textContent = data.transcript || "No speech detected";
                                 document.getElementById("transcriptBox").style.display = "block";
                             } else {
