@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scribe Voice Recorder</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            text-align: center;
+            padding: 20px;
+        }
+
+        button {
+            font-size: 18px;
+            padding: 10px 20px;
+            margin: 5px;
+        }
+
+        #status {
+            margin-top: 15px;
+            font-size: 16px;
+        }
+
+        #transcriptBox {
+            margin-top: 25px;
+            padding: 10px;
+            max-width: 90%;
+            text-align: left;
+            margin-left: auto;
+            margin-right: auto;
+            white-space: pre-wrap;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            font-size: 14px;
+            background-color: #f8f8f8;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Scribe Voice Recorder</h1>
+    <button id="startSessionBtn">Start Session</button>
+    <button id="startBtn" disabled>Start Recording</button>
+    <button id="endSessionBtn" disabled>End Session</button>
+
+    <div id="status">No session started</div>
+
+    <div id="transcriptBox" style="display: none;">
+        <strong>Transcript:</strong>
+        <div id="transcriptText"></div>
+    </div>
+
+    <script>
+        let mediaRecorder, audioChunks = [], silenceStart = null;
+        let analyser, audioContext, dataArray, stream;
+        const silenceTimeout = 2000; // ms
+        const threshold = 0.01;
+
+        document.getElementById("startSessionBtn").onclick = async function () {
+            const res = await fetch("/start_session", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({})
+            });
+
+            if (res.ok) {
+                document.getElementById("status").textContent = "🟢 Session started";
+                document.getElementById("startBtn").disabled = false;
+                document.getElementById("endSessionBtn").disabled = false;
+                document.getElementById("startSessionBtn").disabled = true;
+            } else {
+                document.getElementById("status").textContent = "❌ Failed to start session";
+            }
+        };
+
+        document.getElementById("endSessionBtn").onclick = async function () {
+            // Clean up any active recording
+            cleanupAudioResources();
+
+            const res = await fetch("/end_session", { method: "POST" });
+            if (res.ok) {
+                document.getElementById("status").textContent = "🔴 Session ended";
+                document.getElementById("startBtn").disabled = true;
+                document.getElementById("endSessionBtn").disabled = true;
+                document.getElementById("startSessionBtn").disabled = false;
+            } else {
+                document.getElementById("status").textContent = "❌ Failed to end session";
+            }
+        };
+
+        document.getElementById("startBtn").onclick = async function () {
+            this.disabled = true;
+            document.getElementById("status").textContent = "🎙️ Getting microphone access...";
+            document.getElementById("transcriptBox").style.display = "none";
+
+            try {
+                // Clean up any existing resources first
+                cleanupAudioResources();
+
+                // Request fresh microphone access for each recording
+                stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        sampleRate: 16000
+                    }
+                });
+
+                console.log('✅ Fresh microphone access granted');
+                document.getElementById("status").textContent = "🎙️ Setting up audio processing...";
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 2048;
+                source.connect(analyser);
+                dataArray = new Uint8Array(analyser.fftSize);
+
+                // Test audio levels before starting recording
+                let audioTestPassed = false;
+                let testAttempts = 0;
+                const maxTestAttempts = 50; // 5 seconds max
+
+                const testAudio = () => {
+                    if (testAttempts >= maxTestAttempts) {
+                        document.getElementById("status").textContent = "❌ No audio input detected";
+                        cleanupAudioResources();
+                        document.getElementById("startBtn").disabled = false;
+                        return;
+                    }
+
+                    analyser.getByteTimeDomainData(dataArray);
+                    const rms = Math.sqrt(dataArray.reduce((sum, val) => {
+                        const normalized = (val - 128) / 128;
+                        return sum + normalized * normalized;
+                    }, 0) / dataArray.length);
+
+                    testAttempts++;
+
+                    if (rms > 0.001) { // Very low threshold for any audio
+                        audioTestPassed = true;
+                        console.log('✅ Audio input detected, RMS:', rms);
+                        startRecording();
+                    } else {
+                        console.log('⏳ Waiting for audio input, RMS:', rms, 'attempt:', testAttempts);
+                        setTimeout(testAudio, 100);
+                    }
+                };
+
+                const startRecording = () => {
+                    document.getElementById("status").textContent = "🎙️ Listening... (speak now)";
+
+                    // Configure MediaRecorder with fallback options
+                    let options = { mimeType: 'audio/webm;codecs=opus' };
+
+                    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                        options = { mimeType: 'audio/webm' };
+                        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                            options = { mimeType: 'audio/mp4' };
+                            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                                options = {}; // Use default
+                            }
+                        }
+                    }
+
+                    console.log('🎵 Using MIME type:', options.mimeType || 'default');
+
+                    mediaRecorder = new MediaRecorder(stream, options);
+                    audioChunks = []; // Reset chunks at start
+
+                    mediaRecorder.ondataavailable = e => {
+                        console.log('📊 Data available:', e.data.size, 'bytes');
+                        if (e.data.size > 0) {
+                            audioChunks.push(e.data);
+                        }
+                    };
+
+                    mediaRecorder.onstop = async () => {
+                        console.log('🛑 MediaRecorder stopped, processing audio...');
+                        console.log('📦 Total chunks:', audioChunks.length);
+
+                        // Don't clean up stream here - let cleanupAudioResources handle it
+
+                        // Wait for all data to be available
+                        await new Promise(resolve => setTimeout(resolve, 300));
+
+                        if (audioChunks.length === 0) {
+                            document.getElementById("status").textContent = "❌ No audio chunks recorded";
+                            cleanupAudioResources();
+                            document.getElementById("startBtn").disabled = false;
+                            return;
+                        }
+
+                        const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+                        console.log(`📦 Created blob: size=${blob.size} bytes, type=${blob.type}`);
+
+                        if (blob.size < 100) { // Very small threshold
+                            document.getElementById("status").textContent = `❌ Recording too short (${blob.size} bytes)`;
+                            cleanupAudioResources();
+                            document.getElementById("startBtn").disabled = false;
+                            return;
+                        }
+
+                        document.getElementById("status").textContent = "⬆️ Uploading...";
+
+                        try {
+                            const res = await fetch("/upload", {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type": blob.type || "audio/webm"
+                                },
+                                body: blob
+                            });
+
+                            if (res.ok) {
+                                const data = await res.json();
+                                document.getElementById("status").textContent = "✅ Transcription complete";
+                                document.getElementById("transcriptText").textContent = data.transcript || "No speech detected";
+                                document.getElementById("transcriptBox").style.display = "block";
+                            } else {
+                                const errorText = await res.text();
+                                console.error('❌ Upload failed:', errorText);
+                                document.getElementById("status").textContent = "❌ Upload failed";
+                            }
+                        } catch (uploadError) {
+                            console.error('❌ Upload error:', uploadError);
+                            document.getElementById("status").textContent = "❌ Upload error";
+                        }
+
+                        // Clean up everything and re-enable button
+                        cleanupAudioResources();
+                        document.getElementById("startBtn").disabled = false;
+                    };
+
+                    mediaRecorder.onerror = (event) => {
+                        console.error('❌ MediaRecorder error:', event.error);
+                        document.getElementById("status").textContent = "❌ Recording error";
+                        cleanupAudioResources();
+                        document.getElementById("startBtn").disabled = false;
+                    };
+
+                    // Start recording without time slicing initially to avoid empty chunks
+                    mediaRecorder.start();
+                    console.log('🎬 Recording started');
+
+                    // Monitor for silence and stop recording
+                    monitorSilence();
+                };
+
+                // Start audio test
+                testAudio();
+
+            } catch (err) {
+                console.error('❌ Microphone error:', err);
+                document.getElementById("status").textContent = "❌ Microphone permission denied or unavailable";
+                cleanupAudioResources();
+                this.disabled = false;
+            }
+        };
+
+        function monitorSilence() {
+            const checkSilence = () => {
+                if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+                    return; // Stop monitoring if recorder is inactive
+                }
+
+                if (!analyser || !dataArray) {
+                    console.log('⚠️ Analyser not available, stopping silence monitoring');
+                    return;
+                }
+
+                analyser.getByteTimeDomainData(dataArray);
+                const rms = Math.sqrt(dataArray.reduce((sum, val) => {
+                    const normalized = (val - 128) / 128;
+                    return sum + normalized * normalized;
+                }, 0) / dataArray.length);
+
+                if (rms < threshold) {
+                    if (!silenceStart) {
+                        silenceStart = Date.now();
+                    } else if (Date.now() - silenceStart > silenceTimeout) {
+                        console.log('🔇 Silence detected, stopping recording...');
+                        if (mediaRecorder && mediaRecorder.state === 'recording') {
+                            mediaRecorder.stop();
+                        }
+                        return;
+                    }
+                } else {
+                    silenceStart = null;
+                }
+
+                requestAnimationFrame(checkSilence);
+            };
+            checkSilence();
+        }
+
+        // Clean up function to properly reset everything
+        function cleanupAudioResources() {
+            console.log('🧹 Cleaning up audio resources...');
+
+            // Reset silence detection
+            silenceStart = null;
+
+            // Stop and clean up stream
+            if (stream) {
+                stream.getTracks().forEach(track => {
+                    track.stop();
+                    console.log('🛑 Stopped audio track');
+                });
+                stream = null;
+            }
+
+            // Close audio context
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close();
+                console.log('🔇 Closed audio context');
+                audioContext = null;
+            }
+
+            // Clear references
+            analyser = null;
+            dataArray = null;
+            mediaRecorder = null;
+            audioChunks = [];
+        }
+    </script>
+</body>
+
+</html>

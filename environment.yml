@@ -1,0 +1,20 @@
+name: scribe-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy=1.26.4
+  - pip
+  - jupyter
+  - ipykernel
+  - ipywidgets
+  - pip:
+      - torch==2.1.0
+      - faster-whisper
+      - ffmpeg-python
+      - tqdm
+      - flask
+      - python-dotenv
+      - google-cloud-storage>=2.0.0
+      - google-cloud-speech>=2.24.0
