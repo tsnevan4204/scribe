@@ -3,3 +3,5 @@ gcs-upload-audio.json
 
 uploads/*
 !uploads/.gitkeep
+
+__pychache__

@@ -1,19 +1,14 @@
 # === Updated Flask App with Better Audio Handling ===
-import litellm
-from litellm import completion
 from flask import Flask, request, send_from_directory, jsonify
 from google.cloud import storage, speech_v1p1beta1 as speech
 from dotenv import load_dotenv
 from datetime import datetime
 import os, logging, ffmpeg, wave, tempfile, shutil
 import pytz
+from llm_format import generate_medical_record_from_transcript
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-
-litellm.api_key = os.getenv("GROQ_API_KEY")
-litellm.provider = "groq"
-MODEL_NAME="groq/deepseek-r1-distill-llama-70b"
 
 app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
@@ -149,7 +144,6 @@ def end_session():
             logging.info(f"🧹 Cleaned up local session folder: {SESSION_FOLDER}")
 
         cleanup_residual_folders()
-        cleanup_gcs_residual_folders()
 
     except Exception as cleanup_error:
         logging.warning(f"⚠️ Session cleanup warning: {cleanup_error}")
@@ -176,59 +170,6 @@ def cleanup_residual_folders():
             except Exception as e:
                 logging.warning(f"⚠️ Could not clean up residual folder {folder}: {e}")
 
-import re
-
-def clean_llm_output(text: str) -> str:
-    """Removes DeepSeek-style <think>...</think> blocks."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-
-def generate_medical_record_from_transcript(transcript_text: str) -> str:
-    prompt = (
-        "You are a clinical documentation assistant. Format the following unstructured "
-        "medical transcript into a structured SOAP medical record.\n\nTranscript:\n"
-        f"{transcript_text.strip()}"
-    )
-
-    try:
-        result = completion(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "You are a medical record assistant."},
-                {"role": "user", "content": prompt},
-            ]
-        )
-        raw_output = result["choices"][0]["message"]["content"]
-        return clean_llm_output(raw_output)
-    except Exception as e:
-        return f"[Error generating medical record: {str(e)}]"
-
-def cleanup_gcs_residual_folders():
-    """Clean up empty folders in GCS bucket"""
-    try:
-        # List all blobs to find folder patterns
-        blobs = list(bucket.list_blobs())
-        
-        # Group by folder structure
-        folders = {}
-        for blob in blobs:
-            parts = blob.name.split('/')
-            if len(parts) >= 2:
-                folder = parts[0]
-                if folder not in folders:
-                    folders[folder] = []
-                folders[folder].append(blob)
-        
-        # Find empty folders or folders with old naming patterns
-        for folder_name, folder_blobs in folders.items():
-            # Check for old naming pattern (YYYYMMDD_HHMMSS without session_ prefix)
-            if folder_name.count('_') == 1 and folder_name.startswith('202') and not folder_name.startswith('session_'):
-                if len(folder_blobs) == 0:
-                    logging.info(f"🧹 Found empty residual GCS folder: {folder_name}")
-                    # Note: GCS doesn't have actual empty folders, they're just prefixes
-                    # The empty folder will disappear naturally when no objects use that prefix
-        
-    except Exception as e:
-        logging.warning(f"⚠️ GCS cleanup warning: {e}")
 
 @app.route("/upload", methods=["POST"])
 def upload():
